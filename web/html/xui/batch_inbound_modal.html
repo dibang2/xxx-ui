@@ -1,0 +1,151 @@
+{{define "batchInboundModal"}}
+<a-modal id="batch-inbound-modal" v-model="batchModal.visible" title="批量添加入站" @ok="batchModal.ok"
+         :confirm-loading="batchModal.confirmLoading" :closable="true" :mask-closable="false"
+         ok-text="批量添加" cancel-text="取消" width="520px">
+    <a-form layout="vertical">
+        <a-form-item label="起始端口" required>
+            <a-input-number v-model="batchModal.startPort" :min="1" :max="65535" placeholder="如 10001" style="width: 100%"></a-input-number>
+        </a-form-item>
+        <a-form-item label="数量" required>
+            <a-input-number v-model="batchModal.count" :min="1" :max="100" placeholder="1-100" style="width: 100%"></a-input-number>
+        </a-form-item>
+        <a-form-item label="协议" required>
+            <a-select v-model="batchModal.protocol" style="width: 100%">
+                <a-select-option value="vmess">VMess</a-select-option>
+                <a-select-option value="vless">VLESS</a-select-option>
+                <a-select-option value="trojan">Trojan</a-select-option>
+                <a-select-option value="shadowsocks">Shadowsocks</a-select-option>
+            </a-select>
+        </a-form-item>
+        <a-form-item label="备注前缀">
+            <a-input v-model.trim="batchModal.remarkPrefix" placeholder="如 节点，将生成 节点-10001、节点-10002..."></a-input>
+        </a-form-item>
+        <a-form-item label="参考入站">
+            <a-select v-model="batchModal.templateId" placeholder="选择现有入站复制配置，不选则使用默认" allow-clear style="width: 100%">
+                <a-select-option v-for="item in batchModal.availableInbounds" :key="item.id" :value="item.id">
+                    [[ item.remark || item.port ]] ([[ item.protocol ]] - [[ item.port ]])
+                </a-select-option>
+            </a-select>
+        </a-form-item>
+    </a-form>
+</a-modal>
+<script>
+    const batchModal = {
+        visible: false,
+        confirmLoading: false,
+        startPort: 10001,
+        count: 5,
+        protocol: 'vmess',
+        remarkPrefix: '节点',
+        templateId: undefined,
+        availableInbounds: [],
+        confirm: null,
+        async ok() {
+            if (!this.startPort || this.startPort < 1 || this.startPort > 65535) {
+                Vue.prototype.$message.error('请输入有效的起始端口');
+                return;
+            }
+            if (!this.count || this.count < 1 || this.count > 100) {
+                Vue.prototype.$message.error('数量需在 1-100 之间');
+                return;
+            }
+            const inboundsData = this.generateInbounds();
+            if (!inboundsData || inboundsData.length === 0) {
+                return;
+            }
+            this.confirmLoading = true;
+            try {
+                if (this.confirm) {
+                    await this.confirm(inboundsData);
+                }
+            } finally {
+                this.confirmLoading = false;
+            }
+        },
+        generateInbounds() {
+            let templateInbound = null;
+            if (this.templateId) {
+                const found = this.availableInbounds.find(i => i.id === this.templateId);
+                if (found) {
+                    templateInbound = (new DBInbound(found)).toInbound();
+                }
+            }
+            if (!templateInbound) {
+                templateInbound = new Inbound();
+                templateInbound.protocol = this.protocol;
+                templateInbound.settings = Inbound.Settings.getSettings(this.protocol);
+                if (this.protocol === Protocols.TROJAN) {
+                    templateInbound.stream.security = 'tls';
+                }
+            } else if (templateInbound.protocol !== this.protocol) {
+                templateInbound.protocol = this.protocol;
+                templateInbound.settings = Inbound.Settings.getSettings(this.protocol);
+            }
+            const result = [];
+            const prefix = ObjectUtil.isEmpty(this.remarkPrefix) ? '' : (this.remarkPrefix + '-');
+            for (let i = 0; i < this.count; i++) {
+                const port = this.startPort + i;
+                if (port > 65535) {
+                    Vue.prototype.$message.error('端口范围超出 65535');
+                    return null;
+                }
+                const inbound = Inbound.fromJson(templateInbound.toJson());
+                inbound.port = port;
+                const remark = prefix + port;
+                const settings = inbound.settings;
+                if (this.protocol === Protocols.VMESS && settings.vmesses) {
+                    settings.vmesses[0].id = RandomUtil.randomUUID();
+                } else if (this.protocol === Protocols.VLESS && settings.vlesses) {
+                    settings.vlesses[0].id = RandomUtil.randomUUID();
+                } else if (this.protocol === Protocols.TROJAN && settings.clients) {
+                    settings.clients[0].password = RandomUtil.randomSeq(12);
+                } else if (this.protocol === Protocols.SHADOWSOCKS) {
+                    settings.password = RandomUtil.randomSeq(12);
+                }
+                const settingsStr = (settings && settings.toJson) ? JSON.stringify(settings.toJson()) : '{}';
+                const streamStr = (inbound.stream && inbound.stream.toJson) ? JSON.stringify(inbound.stream.toJson()) : '{}';
+                const sniffStr = (inbound.canSniffing && inbound.canSniffing() && inbound.sniffing && inbound.sniffing.toJson)
+                    ? JSON.stringify(inbound.sniffing.toJson()) : '{}';
+                result.push({
+                    up: 0,
+                    down: 0,
+                    total: 0,
+                    remark: remark,
+                    enable: true,
+                    expiryTime: 0,
+                    listen: inbound.listen || '',
+                    port: port,
+                    protocol: this.protocol,
+                    settings: settingsStr,
+                    streamSettings: streamStr,
+                    sniffing: sniffStr
+                });
+            }
+            return result;
+        },
+        show(opts) {
+            this.visible = true;
+            this.startPort = opts.startPort || 10001;
+            this.count = opts.count || 5;
+            this.protocol = opts.protocol || 'vmess';
+            this.remarkPrefix = opts.remarkPrefix || '节点';
+            this.templateId = opts.templateId;
+            this.availableInbounds = opts.availableInbounds || [];
+            this.confirm = opts.confirm || (function(){});
+        },
+        close() {
+            this.visible = false;
+            this.confirmLoading = false;
+        },
+        loading(loading) {
+            this.confirmLoading = !!loading;
+        }
+    };
+
+    new Vue({
+        delimiters: ['[[', ']]'],
+        el: '#batch-inbound-modal',
+        data: { batchModal: batchModal }
+    });
+</script>
+{{end}}
